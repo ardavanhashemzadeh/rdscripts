@@ -1,0 +1,84 @@
+#!/bin/bash
+# Cloud Foundry Tools
+# https://linkedin.com/in/ardyhash
+
+scriptName=$(basename -- "$0")
+export numberRE='^[0-9]+$'
+export cfAppsStartLine=5
+export cfAppStartLine=14
+export restartDenominator=7
+export refreshDenominator=5
+export paramCommand=$1
+
+if [ -d $CF_HOME ]; then cp $CF_HOME ~/.cf/$$.$BASHPID -rf; export CF_HOME=~/.cf/$$.$BASHPID; fi
+
+date
+
+if [ $# -lt 1 ]; then
+cat <<HELP
+Not enough arguments given, please use following format:
+Rampage/Status:                 ./$scriptName kill/status
+Restart/Refresh App Instance:   ./$scriptName rai/rfi APPNAME INST
+Rolling Restart/Refresh:        ./$scriptName rr/rf APPNAME
+Rolling Restart/Refresh:        ./$scriptName rr/rf APPNAME INSTCOUNT
+Rolling Restart/Refresh:        ./$scriptName rr/rf APPNAME FIRSTINST LASTINST
+Rolling Restart/Refresh:        ./$scriptName rr/rf APPNAME FIRSTINST LASTINST INSTCOUNT
+HELP
+exit 1
+fi
+
+function GetAppInfo {
+export appstring=$(cf apps | tail -n +$cfAppsStartLine | grep started | grep $1 | tr "," " " | awk '{print $1","$6}') || return 1
+export app=$(echo $appstring | tr "," " " | awk '{print $1}')
+export url=$(echo $appstring | tr "," " " | awk '{print $2}')
+export guid=$(cf app $app --guid) || return 2 ; }; export -f GetAppInfo
+
+function SimpleRestartAppInstance { cf restart-app-instance $1 $2 | head -n1; if [ ${PIPESTATUS[0]} -eq 141 ]; then return 0; else return ${PIPESTATUS[0]}; fi ; }; export -f SimpleRestartAppInstance
+
+function RestartAppInstance { GetAppInfo $1
+cf app $app | tail -n +$cfAppStartLine | awk '{print $1}' | grep -w "#$2" > /dev/null || return 1
+until (SimpleRestartAppInstance $app $2); do echo "Failed to restart instance $2 of $app, retrying in 10 seconds"; sleep 10; done
+sleep 20
+until (curl $url/health -H "X-CF-APP-INSTANCE":"$guid:$2" -sfI --silent | head -n1 | grep "200 OK" > /dev/null 2>&1 ); do
+        cf app $app | tail -n +$cfAppStartLine | grep -w "#$2" | awk -v app=$app -v inst=$2 \
+        '{ if ($1=="#"inst && $2=="crashed") system ("cf restart-app-instance "app" "inst" | head -n1; sleep 180"); print $0 }' > /dev/null 2>&1
+        sleep 10
+done }; export -f RestartAppInstance
+
+function RefreshAppInstance { GetAppInfo $1
+cf app $app | tail -n +$cfAppStartLine | awk '{print $1}' | grep -w "#$2" > /dev/null && \
+curl -X POST $url/refresh -H "X-CF-APP-INSTANCE":"$guid:$2"  -sSfI > /dev/null && echo "Refreshed instance $2 of $1" ; }; export -f RefreshAppInstance
+
+function MatchingApps { for app in `cf apps | tail -n +$cfAppsStartLine | grep $1 | awk '{print $1}'`; do echo $app; done }; export -f MatchingApps
+function FirstInstance { if [[ $1 -ge 0 ]] && [[ $1 =~ $numberRE ]]; then echo $1; else echo 0; fi }; export -f FirstInstance
+function LastInstance { if [[ $1 -le $totalInstances ]] && [[ $1 =~ $numberRE ]]; then echo $1; else echo $totalInstances; fi }; export -f LastInstance
+function ConcurrentInstances { if [[ $1 -le $concurrentInstances ]] && [[ $1 =~ $numberRE ]]; then echo $1; else echo $concurrentInstances; fi }; export -f ConcurrentInstances
+
+function RollingCommand { app=$1
+export concurrentTotalInstances=`cf apps | grep $app | tr "/" " " | awk -v d=$denominator '{if ($4/5 <1) print "1 "$3; else print int($4/d)" "$3}'`
+export concurrentInstances=`echo $concurrentTotalInstances | awk '{print $1}'`
+export totalInstances=`echo $concurrentTotalInstances | awk '{print $2}'`
+if [ $# -le 2 ]; then
+        for inst in `seq 0 $totalInstances`; do echo $app $inst
+        done | xargs -L1 -P`ConcurrentInstances $2` -I{} bash -c "$command {}"
+fi
+if [ $# -le 4 ] && [[ $2 =~ $numberRE ]] && [[ $3 =~ $numberRE ]]; then
+        for inst in $(seq `FirstInstance $2` `LastInstance $3`); do echo $app $inst
+        done | xargs -L1 -P`ConcurrentInstances $4` -I{} bash -c "$command {}"
+fi }; export -f RollingCommand
+
+if [ $paramCommand = "rr" ] || [ $paramCommand = "rai" ]; then command=RestartAppInstance; denominator=$restartDenominator; fi
+if [ $paramCommand = "rf" ] || [ $paramCommand = "rfi" ]; then command=RefreshAppInstance; denominator=$refreshDenominator; fi
+
+if [ $paramCommand == "kill" ]; then ps aux | grep -e cftools -e RefreshAppInstance -e RestartAppInstance | awk '{print $2}' | xargs -L1 kill; fi
+if [ $paramCommand == "status" ]; then ps aux | grep -e cftools -e RefreshAppInstance -e RestartAppInstance | grep -v grep; fi
+if [ $paramCommand == "rai" ] || [ $paramCommand = "rfi" ] && [[ $3 =~ $numberRE ]]; then
+        for app in `MatchingApps $2`; do
+                $command $app $3
+        done; date; exit
+fi
+if [ $paramCommand == "rr" ] || [ $1 == "rf" ] && [ $# -ge 2 ]; then
+        for app in `MatchingApps $2`; do
+                RollingCommand $app $3 $4 $5
+        done; date; exit
+fi
