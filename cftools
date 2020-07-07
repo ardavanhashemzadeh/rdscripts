@@ -75,7 +75,7 @@ function RestartCrashedInstances {
 }; export -f RestartCrashedInstances
 
 function GetAppInfo {
-	export appstring=$(ListApps $1 | tr "," " " | tr "/" " " | awk -v d=$denominator '{if ($4/d <1) print $1" 1 "$3" "$7; else print $1" "int($4/d)" "$3" "$7}' ) || return 1
+	export appstring=$(ListApps $1 | tr "," " " | tr "/" " " | awk -v d=$denominator '{if ($4/d <1) print $1" 1 "$4" "$7; else print $1" "int($4/d)" "$4" "$7}' ) || return 1
 	export app=$(echo $appstring | awk '{print $1}')
 	export concurrentInstances=$(echo $appstring | awk '{print $2}')
 	export totalInstances=$(echo $appstring | awk '{print $3}')
